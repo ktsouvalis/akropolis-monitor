@@ -1,106 +1,90 @@
-# ak-monitor
+# akropolis-monitor
 
-A pair of TUI tools for the **Authentik HA Cluster**:
+Operational TUIs for an **Authentik HA cluster** (Authentik + Patroni/PostgreSQL
++ etcd + HAProxy + keepalived/VIP + nginx). Nothing here runs inside the
+cluster: it connects out over HTTP and SSH from an operator's workstation.
 
-| Script | Purpose |
-|---|---|
-| `monitor.py` | Real-time dashboard — polls every 20 s, one panel per service |
-| `logs_viewer.py` | Log viewer — fetches warnings/errors from all nodes via SSH |
-
-Built with [Textual](https://textual.textualize.io/). No agents, no daemons — runs from any workstation that can reach the cluster network (or VXLAN interface).
-
----
-
-## What it monitors
-
-| Panel | How |
-|---|---|
-| **VIP / keepalived** | HTTP to HAProxy stats on VIP — confirms VIP is reachable |
-| **HAProxy backends** | Parses `/stats;csv` — shows per-backend UP/DOWN count per node |
-| **PostgreSQL / Patroni** | `GET http://<node>:8008/` — role (LEADER/REPLICA), state, timeline |
-| **etcd** | `GET http://<node>:2379/health` + `/v2/stats/self` — health + leader |
-| **Authentik** | `/-/health/live/` and `/-/health/ready/` — server + worker per node |
-
----
-
-## Color coding
-
-| Indicator | Meaning |
-|---|---|
-| ${\color{green}●}$ Green | Service is up and in primary/active/leader role |
-| ${\color{gray}●}$ Grey | Service is up but in backup/replica/follower role (healthy, non-primary) |
-| ${\color{yellow}●}$ Yellow | Degraded — partial backends UP |
-| ${\color{red}●}$ Red | Service is down or unreachable |
-| ${\color{green}●}$ Top banner green | All services across all nodes are healthy |
-| ${\color{red}●}$ Top banner red | One or more services are down |
-
----
-
-## Requirements
-
-- Python 3.11+
-- Network access to all cluster node IPs (direct or via VXLAN)
-- HAProxy stats endpoint enabled (port 9000 by default)
-- Patroni REST API accessible (port 8008)
-- etcd HTTP API accessible (port 2379)
-- Authentik HTTPS accessible on port 9443 per node
-
----
-
-## Installation
-1. Clone the repo and set up a Python environment:
-```bash
-git clone <repo> ak-monitor
-cd ak-monitor
 ```
-2. Create and activate a virtual environment
-```bash
-python3 -m venv venv
-source venv/bin/activate
-```
-or
-
-```bash
-conda create -n ak-monitor python=3.11
-conda activate ak-monitor
-```
-3. Install dependencies:
-```bash
-pip install -r requirements.txt
+akropolis-monitor dashboard      # real-time cluster health
+akropolis-monitor logs           # warnings and errors from every node
 ```
 
+Companion to [akropolis](https://github.com/ktsouvalis/akropolis), which
+provisions the cluster this watches. akropolis emits a ready-made config file
+for this tool at handoff.
+
 ---
 
-## Configuration
+## Install
 
-All settings are driven by configuration yaml variables. No config files to edit.
+Download the single-file executable from
+[Releases](https://github.com/ktsouvalis/akropolis-monitor/releases). It carries
+its own pure-Python dependencies; there is no install step and no virtualenv.
+
+```bash
+sudo apt install python3-cryptography python3-bcrypt python3-nacl python3-psycopg2
+curl -fLO https://github.com/ktsouvalis/akropolis-monitor/releases/download/v1.0.0/akropolis-monitor
+chmod +x akropolis-monitor
+./akropolis-monitor --version
+```
+
+Those four packages are deliberately **not** bundled: zipimport cannot load
+compiled extension modules out of a zip. Keeping them on the distribution's
+package track also means `cryptography` keeps getting security updates instead
+of being frozen inside a release artifact nobody re-cuts for six months.
+
+`python3-psycopg2` is optional. Without it the dashboard runs normally but
+omits the PostgreSQL replication-slot detail. The other three are required,
+because paramiko will not import without them and `logs` is built on paramiko.
+
+Verify the download with `sha256sum -c SHA256SUMS`.
+
+<details>
+<summary>From source instead</summary>
+
+```bash
+git clone https://github.com/ktsouvalis/akropolis-monitor
+cd akropolis-monitor
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e .
+akropolis-monitor --version
+```
+
+To build the executable yourself: `PYTHON=python3.10 ./tools/build_pyz.sh`.
+Python 3.10 is the reference interpreter; a build on a newer one runs fine
+locally but will not match the release checksum, and may omit packages a 3.10
+host needs.
+</details>
+
+---
+
+## Configure
+
+One YAML file per site.
 
 ```bash
 cp config.yml.example config.yml
-nano config.yml     # fill in your IPs, passwords, node names
+$EDITOR config.yml          # IPs, node names, ports, credentials
 ```
 
-Load the default config file and run:
+Run against a specific site by pointing at its file:
 
 ```bash
-python monitor.py
-```
-or specify a custom config file:
-
-```bash
-python monitor.py --config custom_config.yaml
+akropolis-monitor dashboard config.site-b.yml
+akropolis-monitor logs --config config.site-b.yml
 ```
 
----
-
+Note the asymmetry: `dashboard` takes the path as a bare positional argument,
+`logs` takes `--config`. Both spellings predate this package and are in
+operators' shell history, so they were kept rather than unified.
 
 ### Scheme / TLS (optional)
 
-The per-node and VIP `/monitor` probes default to `https://<host>:443`, which is
-correct for any TLS-terminating cluster. A cluster provisioned **without** TLS
-serves plain HTTP on `:80`; probing it with `https://` marks every node
-UNREACHABLE and, because nginx reachability is how keepalived state is inferred,
-shows every node as FAULT with a phantom priority drop.
+The per-node and VIP `/monitor` probes default to `https://<host>:443`, which
+is correct for any TLS-terminating cluster. A cluster provisioned **without**
+TLS serves plain HTTP on `:80`; probing it with `https://` marks every node
+UNREACHABLE and, because nginx reachability is how keepalived state is
+inferred, shows every node as FAULT with a phantom priority drop.
 
 ```yaml
 scheme:
@@ -109,87 +93,81 @@ scheme:
   verify_tls: false    # true only for a publicly trusted certificate
 ```
 
-Omit the block entirely and behaviour is exactly as before — existing configs
-need no changes. `akropolis` fills this in automatically in the config it emits
+Omit the block entirely and behaviour is exactly as before, so existing configs
+need no changes. akropolis fills this in automatically in the config it emits
 at handoff.
 
 Authentik's own `:9443` health and API endpoints are unaffected: they are HTTPS
 regardless of the nginx TLS provider, since `AUTHENTIK_LISTEN__HTTPS` is always
 set.
 
-## Key bindings (monitor.py)
+---
+
+## `dashboard`
+
+Real-time TUI, one panel per service, refreshed every `refresh_interval`
+seconds.
+
+| Panel | How |
+|---|---|
+| **VIP / keepalived / nginx** | `/monitor` on each node and on the VIP; infers the track script's state and effective priorities |
+| **nginx connections** | `/nginx_status` per node: active, reading, writing, waiting |
+| **Authentik backends** | `/-/health/live/` per node |
+| **Authentik workers** | `GET /api/v3/tasks/workers/`, mapped back to nodes |
+| **Authentik worker queue** | `GET /api/v3/tasks/tasks/status/`: queued, running, rejected, errored |
+| **HAProxy backends** | parses `/stats;csv`: per-backend UP/DOWN, request rate, 5xx |
+| **PostgreSQL / Patroni** | `GET :8008/`: role, state, timeline, replication lag, replication slots, last failover |
+| **etcd** | `/health` plus `POST /v3/maintenance/status`: leader, raft term, db size |
+
+Worker health is read from the task API, not from `/-/health/live/` on `:9080`.
+That endpoint is the Rust/axum liveness server and stays 200 even when the
+dramatiq consumer is dead, so it must never be used to judge worker health.
+
+| Indicator | Meaning |
+|---|---|
+| ${\color{green}●}$ Green | Up, and in the primary/active/leader role |
+| ${\color{gray}●}$ Grey | Up, in a backup/replica/follower role (healthy, non-primary) |
+| ${\color{yellow}●}$ Yellow | Degraded: partial backends up, replica not streaming, slots lagging |
+| ${\color{red}●}$ Red | Down or unreachable |
+
+Set `unicode_bullets: false` if your terminal renders `●` as an underscore,
+which is common in Proxmox containers without a UTF-8 locale.
 
 | Key | Action |
 |---|---|
 | `R` | Force immediate refresh |
 | `Q` | Quit |
-| `Ctrl+P` | Pallette |
+| `Ctrl+P` | Command palette |
 
 ---
 
-## log viewer (logs_viewer.py)
+## `logs`
 
-Collects warnings and errors from the last 24 hours across every service and node via SSH. Bare-metal services are read from `journald`; containerised services are read from `docker logs`.
-
-The minimum severity to include is configurable via `--level` (`error`, `warning` — default, `info`, `debug`); each level includes everything at or above it in severity (e.g. `info` includes info/warning/error). `debug` disables filtering entirely and returns every line.
-
-### TUI mode
-
-Node tabs across the top; service sub-tabs within each node. Results stream in per service as SSH calls complete.
+Collects warnings and errors from every service on every node over SSH.
+Containerised services are read with `docker logs`, bare-metal ones from
+`journalctl`.
 
 ```bash
-python3 logs_viewer.py
-python3 logs_viewer.py --config custom_config.yml
-python3 logs_viewer.py --level error
+akropolis-monitor logs                          # TUI, last 24h, warning and above
+akropolis-monitor logs --last 6 --level error
+akropolis-monitor logs --save cluster_logs      # writes cluster_logs.log, no TUI
 ```
 
-Key bindings:
+`--level` takes `debug`, `info`, `warning` (default) or `error`. Each level
+includes everything at or above it in severity, matching `journalctl -p`
+semantics. `debug` disables filtering entirely.
 
-| Key | Action |
-|---|---|
-| `R` | Re-fetch all logs |
-| `Q` | Quit |
+In TUI mode there is a tab per node, with a sub-tab per service; results stream
+in as each SSH call returns. `--save` writes a structured plain-text report
+instead and prints progress to stdout; the `.log` extension is appended if
+omitted.
 
-### Save mode
-
-Fetches all logs and writes a structured plain-text `.log` file — no TUI is shown. Progress is printed to stdout as each result arrives. The `.log` extension is appended automatically if omitted.
-
-```bash
-python3 logs_viewer.py --save cluster_logs
-# writes: cluster_logs.log
-python3 logs_viewer.py --save cluster_logs --level info
-```
-
-Output format:
-
-```
-Authentik HA Cluster — Log Report
-Fetched:  2026-04-28 15:30:00
-Scope:    last 24h, warning and above
-================================================================================
-
-NODE: ak-node-1  (10.99.97.71)
-================================================================================
-
-  SERVICE: Auth Server  [docker: authentik-server-1]
-  ────────────────────────────────────────────────────────────
-  2026-04-28 14:01:33 WARNING  …
-  2026-04-28 14:22:11 ERROR    …
-
-  SERVICE: Patroni  [systemd: patroni]
-  ────────────────────────────────────────────────────────────
-  (no warnings or errors in the last 24h)
-…
-```
-
-### Configuring services
-
-The list of services to poll is defined in `config.yml` under the `services:` key. Each entry specifies a display label, which node group it runs on, whether it is a Docker container or a systemd unit, and the container/unit name.
+Which services get polled is config, not code:
 
 ```yaml
 services:
   - label: "Auth Server"
-    nodes: authentik       # key from the nodes: or keepalived: sections
+    nodes: authentik       # a key from the nodes: map, or "keepalived"
     type: docker
     container: "authentik-server-1"
 
@@ -199,29 +177,63 @@ services:
     unit: "patroni"
 ```
 
-`nodes` must match one of the keys already present in the `nodes:` map (or `keepalived`). Services can be added, removed, or renamed here without touching the code.
-
-### Additional requirements for logs_viewer.py
-
-- SSH access to all cluster nodes (username + password in `config.yml` under `ssh:`)
-- Docker CLI available on each node (`docker logs`)
-- `systemd`/`journalctl` available on nodes running bare-metal services
+Needs SSH access to every node (`ssh.username` and `ssh.key_file` in the
+config), plus the Docker CLI and `journalctl` on the nodes that run them.
 
 ---
 
-## Importing users
+## `import_users.py`
 
-`import_users.py` bulk-imports users into Authentik from a CSV file (columns: surname, name, and an email column — the header just needs to contain `@` somewhere). It reads the Authentik URL and API token from `config.yml`, creates missing users, updates emails on existing ones, and optionally adds everyone to a group.
+A standalone script, deliberately outside the package and the CLI: it is a
+one-off bulk-import tool, not part of the monitoring surface.
+
+It imports users into Authentik from a CSV (surname, name, and an email column
+whose header merely has to contain `@`), reading the Authentik URL and API
+token from the same config file. It creates missing users, updates changed
+emails on existing ones, and can add everyone to a group.
 
 ```bash
-python3 import_users.py users.csv
-python3 import_users.py users.csv --group "Lab Members"
 python3 import_users.py users.csv --dry-run
+python3 import_users.py users.csv --group "Lab Members"
 python3 import_users.py users.csv --config config.site-b.yml
 ```
 
 ---
 
+## Built with
+
+Bundled inside the released executable, as source, under their own licenses.
+`THIRD_PARTY_LICENSES.md` ships with every release and is generated from what
+actually got bundled rather than hand-maintained.
+
+| Package | License | Used for |
+|---|---|---|
+| [Textual](https://textual.textualize.io/) | MIT | Both TUIs |
+| [Rich](https://github.com/Textualize/rich) | MIT | Terminal markup and colour |
+| [requests](https://requests.readthedocs.io/) | Apache-2.0 | Every HTTP probe |
+| [urllib3](https://urllib3.readthedocs.io/) | MIT | HTTP transport, TLS warning suppression |
+| [PyYAML](https://pyyaml.org/) | MIT | Config parsing |
+| [paramiko](https://www.paramiko.org/) | **LGPL-2.1** | SSH for `logs` |
+
+Supplied by the system rather than bundled: `cryptography` (Apache-2.0 / BSD),
+`bcrypt` (Apache-2.0), `PyNaCl` (Apache-2.0), `psycopg2` (LGPL-3.0 with
+exceptions).
+
+paramiko is the one bundled dependency that is not permissively licensed. The
+copy inside the archive is unmodified, readable Python source sitting next to
+the license that covers it.
+
+---
+
 ## Notes
 
-- Authentik TLS verification is disabled (`verify=False`) since the backends use self-signed or internal certs on port 9443. This is intentional and scoped to health check requests only.
+- Authentik TLS verification is disabled (`verify=False`) for the `:9443`
+  health and API probes, since those backends use self-signed or internal
+  certs. This is intentional and scoped to those requests; the nginx probes
+  have their own `scheme.verify_tls` setting.
+- `*.yml` and `*.csv` are gitignored. Only `config.yml.example` is tracked, so
+  real site configs and their credentials stay out of the repository.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

@@ -1,7 +1,13 @@
 *.yml
+!config.yml.example
+!.github/workflows/*.yml
 *.csv
 /.vscode/
 /.claude
-/__pycache__/
+__pycache__/
+*.egg-info/
 *.log
 venv/
+.venv/
+build/
+dist/

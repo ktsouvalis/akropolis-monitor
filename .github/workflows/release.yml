@@ -1,0 +1,179 @@
+name: release
+
+# Cutting a release is: bump the version, update CHANGELOG.md, commit, then
+#
+#   git tag -a v1.0.0 -m "akropolis-monitor 1.0.0"
+#   git push origin master --follow-tags
+#
+# Everything below runs off that tag.
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Manual re-run, for when a tag event is missed, which happens if the tag
+  # is pushed in the same operation that first registers this workflow, since
+  # GitHub evaluates the event against the workflows it already knows about.
+  # Run against the *tag*, not a branch:
+  #
+  #   gh workflow run release --ref v1.0.0
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Must be run against a tag
+        run: |
+          if [ "$GITHUB_REF_TYPE" != "tag" ]; then
+            echo "::error::ref is $GITHUB_REF_NAME ($GITHUB_REF_TYPE), re-run with --ref v<version>"
+            exit 1
+          fi
+
+      # Built on the oldest interpreter the project claims to support. Building
+      # on a newer one risks pip resolving a dependency wheel that requires that
+      # newer interpreter, producing an artifact that silently refuses to run on
+      # a 3.10 host.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Tag must match the declared version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          declared="$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)"
+          module="$(grep -m1 '^__version__ = ' akropolis_monitor/__init__.py | cut -d'"' -f2)"
+          echo "tag=$tag pyproject=$declared module=$module"
+          if [ "$tag" != "$declared" ] || [ "$tag" != "$module" ]; then
+            echo "::error::version mismatch: tag $tag, pyproject $declared, module $module"
+            exit 1
+          fi
+
+      # The zipapp expects these from the system (see tools/build_pyz.sh). The
+      # runner needs them only so the verification step below can import
+      # paramiko; they are not bundled into the artifact.
+      - name: Install the system-supplied runtime dependencies
+        run: python -m pip install --quiet cryptography bcrypt pynacl psycopg2-binary build
+
+      - name: Build the single-file executable
+        run: ./tools/build_pyz.sh
+
+      - name: Build wheel and sdist
+        run: python -m build --outdir dist/
+
+      - name: Verify the artifact
+        run: |
+          ./dist/akropolis-monitor --version
+          ./dist/akropolis-monitor --help > /dev/null
+          ./dist/akropolis-monitor logs --help > /dev/null
+          ./dist/akropolis-monitor dashboard --help > /dev/null
+          python - <<'EOF'
+          import os, sys, zipfile
+          # No compiled object may have survived the strip. build_pyz.sh
+          # asserts this too; repeated here because it is the one defect that
+          # produces a working artifact on the build host and a broken one
+          # everywhere else.
+          z = zipfile.ZipFile("dist/akropolis-monitor")
+          bad = [n for n in z.namelist() if ".so" in n]
+          assert not bad, f"compiled objects in artifact: {bad}"
+
+          # Absolute, because the assertion below compares against this path
+          # and a relative entry makes paramiko.__file__ relative too.
+          zipapp = os.path.abspath("dist/akropolis-monitor")
+          sys.path.insert(0, zipapp)
+          # Both subcommand modules must import out of the zip. logs pulls
+          # paramiko, which is the LGPL dependency and the one most likely to
+          # break under a bad strip. Asserting the *path* matters: with the
+          # system-supplied deps installed on the runner, a paramiko resolved
+          # from site-packages would let a broken artifact pass silently.
+          from akropolis_monitor import dashboard, logs, cli
+          import paramiko
+          assert paramiko.__file__.startswith(zipapp), (
+              f"paramiko loaded from {paramiko.__file__}, not the zipapp"
+          )
+          print(f"{len(z.namelist())} entries, paramiko {paramiko.__version__} from zip")
+          EOF
+
+      - name: Every bundled package must ship its license
+        run: |
+          python - <<'EOF'
+          import re, zipfile
+          z = zipfile.ZipFile("dist/akropolis-monitor")
+          names = set(z.namelist())
+          missing = []
+          for line in open("dist/THIRD_PARTY_LICENSES.md"):
+              if not line.startswith("|") or ":---" in line or "Package" in line:
+                  continue
+              cols = [c.strip() for c in line.strip().strip("|").split("|")]
+              paths = re.findall(r"`([^`]+)`", cols[3]) if len(cols) > 3 else []
+              if not paths:
+                  missing.append(f"{cols[0]}: no license file bundled")
+                  continue
+              for p in paths:
+                  if p not in names:
+                      missing.append(f"{cols[0]}: {p} indexed but absent from archive")
+          if missing:
+              raise SystemExit("license manifest is wrong:\n  " + "\n  ".join(missing))
+          print("every bundled package ships a license file that exists in the archive")
+          EOF
+
+      - name: Checksum
+        working-directory: dist
+        run: |
+          sha256sum akropolis-monitor THIRD_PARTY_LICENSES.md *.whl *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          awk -v ver="${GITHUB_REF_NAME#v}" '
+            $0 ~ "^## \\[" ver "\\]" { inside = 1; next }
+            inside && /^## / { exit }
+            inside { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::error::no CHANGELOG.md section for ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+          cat >> release-notes.md <<'EOF'
+
+          ---
+
+          ### Install
+
+          ```
+          sudo apt install python3-cryptography python3-bcrypt python3-nacl python3-psycopg2
+          curl -fLO https://github.com/ktsouvalis/akropolis-monitor/releases/download/TAG/akropolis-monitor
+          chmod +x akropolis-monitor
+          ./akropolis-monitor --version
+          ```
+
+          `python3-psycopg2` is optional: without it the dashboard runs but
+          omits the PostgreSQL replication-slot detail. The other three are
+          required, because paramiko will not import without them.
+
+          Verify with `sha256sum -c SHA256SUMS`. Reproducible on Python 3.10:
+          `PYTHON=python3.10 ./tools/build_pyz.sh` on this tag.
+          EOF
+          sed -i "s|/download/TAG/|/download/${GITHUB_REF_NAME}/|" release-notes.md
+
+      # gh is preinstalled on the runner. Using it directly rather than a
+      # third-party action keeps a token with contents:write out of code we
+      # do not control.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "akropolis-monitor ${GITHUB_REF_NAME#v}" \
+            --notes-file release-notes.md \
+            dist/akropolis-monitor \
+            dist/THIRD_PARTY_LICENSES.md \
+            dist/SHA256SUMS \
+            dist/*.whl \
+            dist/*.tar.gz

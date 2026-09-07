@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "akropolis-monitor"
+version = "1.0.0"
+description = "Operational TUIs for an Authentik HA cluster (Authentik/Patroni/etcd/HAProxy/keepalived/nginx)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Digital Governance Unit, University of Peloponnese" }]
+dependencies = [
+    "textual>=0.80",
+    "requests>=2.31",
+    "urllib3>=2.0",
+    "PyYAML>=6.0",
+    "paramiko>=3.4",
+    "psycopg2-binary>=2.9",
+]
+
+[project.scripts]
+akropolis-monitor = "akropolis_monitor.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["akropolis_monitor*"]

@@ -1,16 +1,15 @@
-#!/usr/bin/env python3
 """
-logs_viewer.py — Authentik HA cluster log viewer (warnings + errors, last 24h)
+akropolis-monitor log viewer: Authentik HA cluster logs (warnings + errors).
 
 TUI mode (default):
-  Outer tabs: one per node.  Inner tabs: one per service on that node.
+  Outer tabs: one per node. Inner tabs: one per service on that node.
 
 Save mode (--save <file>):
   Fetches logs and writes a plain-text report; no TUI shown.
 
 Usage:
-  conda run -n authentik python3 logs_viewer.py [--config config.yml]
-  conda run -n authentik python3 logs_viewer.py --save cluster_logs.txt
+  akropolis-monitor logs [--config config.yml]
+  akropolis-monitor logs --save cluster_logs.txt
 """
 import getpass
 import os
@@ -30,7 +29,7 @@ MAX_LINES = 500
 
 # Each level includes everything at or above it in severity (matches
 # journalctl's own -p semantics: "info" shows info/warning/error, etc).
-# "debug" has no grep pattern — it means "don't filter, show everything".
+# "debug" has no grep pattern: it means "don't filter, show everything".
 LOG_LEVELS = {
     "debug": {"grep": None, "journalctl": "debug"},
     "info": {"grep": r"(INFO|WARN|WARNING|ERROR|CRITICAL|FATAL|CRIT)", "journalctl": "info"},
@@ -191,7 +190,7 @@ def run_save(config, services, filename, hours, level=DEFAULT_LOG_LEVEL):
             print(f"  [{len(results)}/{total}] {node_name} / {label}: {status}")
 
     with open(filename, "w") as f:
-        f.write("Authentik HA Cluster — Log Report\n")
+        f.write("Authentik HA Cluster - Log Report\n")
         f.write(f"Fetched:  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"Scope:    last {hours}h, {level} and above\n")
         f.write("=" * 80 + "\n")
@@ -301,6 +300,29 @@ class LogsApp(App):
 
 # ─── Entry point ─────────────────────────────────────────────────────────────
 
+def run(
+    config_path: str = "config.yml",
+    last: int = 24,
+    save: str | None = None,
+    level: str = DEFAULT_LOG_LEVEL,
+) -> None:
+    """Load a config and either run the TUI or write a save-mode report.
+    This is what akropolis_monitor.cli calls for the `logs` subcommand."""
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    services = load_services(config)
+    if not services:
+        print("Error: no services defined in config. Add a 'services:' section.", file=sys.stderr)
+        sys.exit(1)
+
+    if save:
+        save_path = save if save.endswith(".log") else save + ".log"
+        run_save(config, services, save_path, last, level)
+    else:
+        LogsApp(config, services, last, level).run()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Authentik HA cluster log viewer")
     parser.add_argument("--config", default="config.yml", help="Path to config file")
@@ -313,20 +335,7 @@ def main():
         help=f"Minimum severity to include (default: {DEFAULT_LOG_LEVEL})",
     )
     args = parser.parse_args()
-
-    with open(args.config) as f:
-        config = yaml.safe_load(f)
-
-    services = load_services(config)
-    if not services:
-        print("Error: no services defined in config. Add a 'services:' section.", file=sys.stderr)
-        sys.exit(1)
-
-    if args.save:
-        save_path = args.save if args.save.endswith(".log") else args.save + ".log"
-        run_save(config, services, save_path, args.last, args.level)
-    else:
-        LogsApp(config, services, args.last, args.level).run()
+    run(args.config, args.last, args.save, args.level)
 
 
 if __name__ == "__main__":

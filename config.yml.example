@@ -1,10 +1,10 @@
 # ============================================================
-#  UoP Authentik HA Cluster Monitor — Site Configuration
-#  Copy to config.yaml and fill in your values.
-#  One file per site (config.site-a.yaml, config.site-b.yaml…)
+#  akropolis-monitor: site configuration
+#  Copy to config.yml and fill in your values.
+#  One file per site (config.site-a.yml, config.site-b.yml, ...)
 # ============================================================
 
-site_name: "UoP Authentik HA Cluster — Site A"
+site_name: "UoP Authentik HA Cluster (Site A)"
 
 # Set to false if your terminal renders ● as underscores (common in Proxmox CTs without UTF-8 locale)
 # Omit or set to true to auto-detect from locale env vars (LANG/LC_ALL/LC_CTYPE)
@@ -56,7 +56,7 @@ nodes:
       name: "ak-node-3"
 
 # Scheme and TLS handling for the per-node / VIP nginx probes.
-# OPTIONAL — omit the whole block and behaviour is exactly as before
+# OPTIONAL: omit the whole block and behaviour is exactly as before
 # (https, port 443, no certificate verification). akropolis fills this in
 # automatically in the config it emits at handoff.
 #
@@ -128,7 +128,7 @@ credentials:
   postgres_password: "your_postgres_password"
 
 keepalived:
-  # Base priorities per node — must match your keepalived.conf
+  # Base priorities per node; must match your keepalived.conf
   # The monitor uses these to calculate effective priority
   # (effective = base - 20 if nginx is down, per weight -20 in track script)
   track_weight: -20

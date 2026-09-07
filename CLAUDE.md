@@ -1,55 +1,194 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with
+code in this repository.
 
 ## What this repo is
 
-`ak-monitor` — standalone operational tooling for a UoP/ESDA-Lab **Authentik HA cluster** (Authentik + Patroni/PostgreSQL + etcd + HAProxy + keepalived/VIP + nginx, 3 nodes per site). Nothing here runs *inside* the cluster; every script connects out to the cluster over HTTP/SSH from an operator's workstation. There is no build step, package, or test suite — these are three independent, config-driven CLI/TUI scripts:
+`akropolis-monitor`: operational tooling for a UoP/ESDA-Lab **Authentik HA
+cluster** (Authentik + Patroni/PostgreSQL + etcd + HAProxy + keepalived/VIP +
+nginx, 3 nodes per site). Nothing here runs *inside* the cluster; everything
+connects out to it over HTTP/SSH from an operator's workstation.
 
-- `monitor.py` — Textual TUI dashboard, polls all services every `refresh_interval` seconds.
-- `logs_viewer.py` — Textual TUI (or `--save` plain-text mode) that pulls warn/error logs from every node over SSH (`docker logs` or `journalctl` depending on service type).
-- `import_users.py` — one-shot CLI that bulk-imports/updates Authentik users from a CSV via the Authentik REST API.
+Companion to [akropolis](https://github.com/ktsouvalis/akropolis), which
+provisions the cluster. The two are packaged the same way on purpose: when
+changing the build or release machinery here, check what akropolis does first
+and stay aligned unless there is a reason not to.
+
+Repository history: this was `ak-monitor`, then `ktsouvalis/authentik`, then
+`akropolis-monitor`. Older commits use the earlier names.
+
+## Layout
+
+```
+akropolis_monitor/          the package; the only importable code
+  cli.py                    argparse dispatcher, lazy-imports the two below
+  dashboard.py              the health TUI (was monitor.py)
+  logs.py                   the log viewer TUI (was logs_viewer.py)
+import_users.py             standalone script, NOT part of the package
+tools/build_pyz.sh          builds the single-file zipapp
+.github/workflows/release.yml   tag-triggered release
+```
 
 ## Running
 
 ```bash
-pip install -r requirements.txt
+pip install -e .
 
-python monitor.py                          # uses ./config.yml
-python monitor.py custom_config.yml        # positional arg, NOT --config
-
-python3 logs_viewer.py                     # TUI mode
-python3 logs_viewer.py --config config.yml --last 12
-python3 logs_viewer.py --save cluster_logs # writes cluster_logs.log, no TUI
+akropolis-monitor dashboard                     # uses ./config.yml
+akropolis-monitor dashboard config.site-b.yml   # positional arg, NOT --config
+akropolis-monitor logs --config config.yml --last 12
+akropolis-monitor logs --save cluster_logs      # writes cluster_logs.log, no TUI
 
 python3 import_users.py users.csv --group "Lab Members" --dry-run
 ```
 
-Note the config-flag inconsistency: `monitor.py` takes the config path as a bare positional arg, while `logs_viewer.py` and `import_users.py` use `--config`. Don't "fix" this to be consistent without checking both call sites — it's a pre-existing quirk, not a bug to silently unify.
+**The config-flag asymmetry is deliberate.** `dashboard` takes a bare
+positional path because `monitor.py` always did; `logs` takes `--config`
+because `logs_viewer.py` always did. Both are in operators' shell history and
+runbooks. Do not "fix" this into consistency: it is a compatibility decision,
+not an oversight.
 
-No automated tests exist. There's no linter/formatter config either — match the surrounding style (no type hints beyond simple annotations, `Optional[...]` from `typing`, f-strings, Rich markup like `[bold green]...[/]` for terminal color).
+No automated tests exist, and there is no linter or formatter config. Match
+the surrounding style: light annotations, `Optional[...]` from `typing`,
+f-strings, Rich markup like `[bold green]...[/]`.
 
-## Config files (`config.yml`)
+## Prose conventions
 
-Everything is driven by one YAML file per site (`config.yml`, `config_esda.yml` are real, gitignored site configs; `config.yml.example` is the tracked template — always update the example, not just the real files, when adding a new config key). Key sections: `nodes:` (per-service IP/name lists — `authentik`, `patroni`, `etcd`, `haproxy`), `ports:`, `credentials:`, `keepalived:` (VIP failover priorities), `services:` (drives `logs_viewer.py`'s node×service matrix), `authentik.url` (used by `import_users.py`).
+No em dashes anywhere in prose, comments, or output strings. Two deliberate
+exceptions, both of which will look like misses and are not:
 
-`*.yml` and `*.csv` are gitignored — only `config.yml.example` is force-tracked. When editing config shape, update all three yaml files (`config.yml`, `config_esda.yml`, `config.yml.example`) even though the first two aren't tracked, since they're the actual working configs on this machine.
+1. The single-character `"—"` placeholder glyphs the dashboard renders for
+   "no data" (unknown Patroni timeline, unset last-refresh). Those are UI, not
+   prose. Leave them.
+2. `import_users.py` in its entirety. It was a one-time script and is left
+   untouched on purpose.
 
-## monitor.py architecture
+## Config files
 
-Single-file Textual app. The pattern repeats per service and is the thing to copy when adding a new panel:
+One YAML file per site. `config.yml`, `config_esda.yml` and friends are real,
+gitignored site configs; `config.yml.example` is the tracked template. **Always
+update the example when adding a config key**, not just the working files.
 
-1. A `check_<service>_node(node) -> dict` function does one blocking network call (`requests`, `psycopg2`, etc.) per node and always returns a dict with at least `ip`, `name`, `ok` — never raises, catches its own exceptions and returns an `ok: False` sentinel shape.
-2. `action_refresh_now` (a `@work(thread=True)` method) fans these out via one shared `ThreadPoolExecutor`, `.result()`s them all, then hands the whole batch to `self.call_from_thread(self._apply_updates, ...)`.
-3. `_apply_updates` pushes each result list into its panel's `data` reactive, then recomputes a `<service>_fail` count and folds it into `all_failures` for the top-level status dot.
-4. A `<Service>Panel(Static)` class renders `self.data` into Rich-markup text via `render_content()`, triggered by `watch_data`.
+Key sections: `nodes:` (per-service IP/name lists: `authentik`, `patroni`,
+`etcd`, `haproxy`), `ports:`, `credentials:`, `keepalived:` (VIP failover
+priorities), `scheme:` (optional; nginx HTTP-vs-HTTPS), `services:` (drives the
+log viewer's node x service matrix), `authentik.url` (used by
+`import_users.py`).
 
-Patroni is special: its results are awaited *before* the rest of the batch because `check_replication_slots`/`check_patroni_history` need the primary's IP, which is only known after `check_patroni_node` resolves.
+`*.yml` and `*.csv` are gitignored, with `config.yml.example` and the workflow
+under `.github/workflows/` negated back in. Check `git add -A --dry-run` after
+touching `.gitignore`.
 
-`_fmt_lag`, `_fmt_bytes`, `failures_to_dot` are shared formatting helpers — reuse them for new panels rather than duplicating bar/threshold logic. `_UNICODE`/`_BULLET` control whether status dots render as `●` or `*` (auto-detected from locale, overridable via `unicode_bullets` in config) — some Proxmox CTs lack UTF-8 locales.
+## dashboard.py architecture
 
-A Redis + Redis Sentinel panel/check pair existed here previously; it was removed when Redis Sentinel was dropped from the stack. If cluster architecture changes again, grep git history (`git log -p -- monitor.py`) rather than assuming the current panel set is final.
+Single-module Textual app. Config is held in **module-level globals**
+(`SITE_NAME`, `VIP`, `AK_NODES`, `P_PATRONI`, `OK`/`DOWN`/`WARN`/`GREY`, ...)
+which start as defaults and are overwritten by `load_site(path)`. `run(path)`
+calls `load_site` and then starts the app; `cli.py` calls `run`.
+
+This is the one structural thing to understand before editing:
+
+> **Anything evaluated at import time cannot see the config.** Class bodies
+> included. `App.TITLE = SITE_NAME` and `reactive(GREY)` were both bugs for
+> exactly this reason: they froze pre-config defaults. Read config globals
+> from *inside* methods (`__init__`, `render_content`, `compose`), never in a
+> class body.
+
+The per-service pattern, which is what to copy when adding a panel:
+
+1. `check_<service>_node(node) -> dict` does one blocking network call and
+   always returns a dict with at least `ip`, `name`, `ok`. It never raises; it
+   catches its own exceptions and returns an `ok: False` sentinel of the same
+   shape.
+2. `action_refresh_now` (a `@work(thread=True)` method) fans these out through
+   one shared `ThreadPoolExecutor`, collects `.result()`s, then hands the batch
+   to `self.call_from_thread(self._apply_updates, ...)`.
+3. `_apply_updates` pushes each result into its panel's `data` reactive, then
+   computes a `<service>_fail` count folded into `all_failures` for the
+   top-level status dot.
+4. `<Service>Panel(Static)` renders `self.data` into Rich markup via
+   `render_content()`, triggered by `watch_data`.
+
+Patroni is special: its results are awaited *before* the rest of the batch,
+because `check_replication_slots` and `check_patroni_history` need the
+primary's IP, which is only known once `check_patroni_node` resolves.
+
+`_fmt_lag`, `_fmt_bytes` and `failures_to_dot` are shared helpers; reuse them
+rather than duplicating threshold logic. `_UNICODE`/`_BULLET` decide whether
+dots render as `●` or `*`, auto-detected from locale and overridable with
+`unicode_bullets`, because some Proxmox CTs lack UTF-8 locales. `load_site`
+recomputes them after reading the config.
+
+psycopg2 is optional at runtime, guarded by `_HAS_PSYCOPG2`. Keep it that way:
+the released zipapp does not bundle it, and `check_replication_slots` returning
+`None` is a supported state, not an error.
+
+A Redis + Redis Sentinel panel existed here previously and was removed when
+Redis Sentinel was dropped from the stack. If the architecture changes again,
+`git log -p -- monitor.py` rather than assuming the current panel set is final.
+
+## Packaging
+
+The release artifact is a PEP 441 zipapp: one executable carrying the package
+plus its pure-Python dependencies. `tools/build_pyz.sh` builds it.
+
+Things that are load-bearing and easy to break:
+
+- **Nothing compiled may be bundled.** zipimport cannot load `.so` files out
+  of a zip. `cryptography`, `bcrypt`, `nacl`, `cffi`, `pycparser` and
+  `psycopg2` are stripped and expected from the system via apt.
+- **The strip pattern is `*.so*`, not `*.so`.** `psycopg2-binary` vendors
+  ~16 shared objects in `psycopg2_binary.libs/` named like
+  `libpq-f521cc7d.so.5.17`. None of them end in `.so`. A `*.so` sweep misses
+  every one and bundles them silently. The build script asserts afterwards
+  that nothing compiled survived; do not remove that assertion.
+- **`.dist-info` pruning must keep license files.** METADATA is required
+  (paramiko resolves its own version through `importlib.metadata` at import
+  and raises `PackageNotFoundError` without it), and LICENSE/COPYING/NOTICE/
+  AUTHORS are required because the archive redistributes these packages'
+  source, paramiko under the LGPL. Most wheels nest licenses under
+  `dist-info/licenses/`, but not all: mdurl 0.1.2 ships a bare top-level
+  `LICENSE`, which a METADATA-only filter deletes silently. That shipped in
+  akropolis v1.0.1. CI now fails the release if any package in
+  `THIRD_PARTY_LICENSES.md` lacks a license file or names one absent from the
+  archive.
+- **`THIRD_PARTY_LICENSES.md` is generated at build time**, never
+  hand-maintained, so it cannot drift from what was actually bundled.
+- **Python 3.10 is the reference interpreter.** The bundled set is
+  interpreter-dependent (`typing_extensions` only appears below 3.11).
+  Building on a newer one produces an artifact that may fail on a 3.10 host,
+  and will not match the release checksum.
+
+## Releasing
+
+Tag-triggered, mirroring akropolis. Bump the version in **both**
+`pyproject.toml` and `akropolis_monitor/__init__.py` (CI fails on mismatch),
+add a `## [x.y.z]` section to `CHANGELOG.md` (CI fails if the tag has no
+section, since release notes are extracted from it), commit, then:
+
+```bash
+git tag -a v1.0.0 -m "akropolis-monitor 1.0.0"
+git push origin master --follow-tags
+```
+
+If the tag is pushed in the same operation that first registers the workflow
+file, GitHub evaluates the event against workflows it already knows about and
+the run never happens. Recover with `gh workflow run release --ref v1.0.0`,
+against the tag and not a branch.
+
+## Development workflow
+
+Commits are authored as `Konstantinos Tsouvalis <kostas.tsou@gmail.com>` and
+delivered as `git format-patch` output for `git am`. Use `git commit -F <file>`
+rather than `-m "..."`: backticks in commit messages get eaten by bash command
+substitution.
 
 ## import_users.py vs history
 
-`mass_import.py` (an earlier, ESDA-lab-specific script with a hardcoded user list) was removed in favor of `import_users.py`, which is CSV-driven, reads its Authentik URL/token from `config.yml`, and handles both create and update-existing-email flows. Any future bulk-import work should extend `import_users.py`, not resurrect the hardcoded-list pattern.
+`mass_import.py` (an earlier ESDA-lab-specific script with a hardcoded user
+list) was removed in favour of `import_users.py`, which is CSV-driven, reads
+its Authentik URL and token from the config file, and handles both create and
+update-existing-email flows. Extend `import_users.py` for future bulk-import
+work rather than resurrecting the hardcoded-list pattern. It stays a standalone
+script and is deliberately not a third subcommand.

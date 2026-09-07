@@ -1,12 +1,13 @@
 """
-UoP Authentik HA Cluster Monitor
----------------------------------
+akropolis-monitor dashboard
+----------------------------
 Real-time TUI dashboard for the full Authentik HA stack.
-All connection details read from config.yml (or a path passed as first argument).
 
-Usage:
-    python monitor.py                        # uses config.yml in current dir
-    python monitor.py config.site-b.yml     # use a specific config file
+All connection details are read from a site config YAML file. The config is
+not loaded at import time: call load_site(path) (or run(path), which calls
+it for you) before starting the app. This lets the module be imported by
+akropolis_monitor.cli without a config file present, and lets a single
+process load a different site's config on each invocation.
 """
 
 import re
@@ -36,83 +37,141 @@ from textual.containers import Horizontal
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ---------------------------------------------------------------------------
-# Load config
+# Site configuration
+#
+# These start out as sane defaults so the module (and its Textual widget
+# classes, defined further down) can be imported before any config file is
+# read. load_site() overwrites every one of them with the real values from
+# a site's YAML config; every check function and panel below reads these as
+# plain module globals, resolved at call time.
 # ---------------------------------------------------------------------------
 
-def load_config(path: str = "config.yml") -> dict:
-    if not os.path.exists(path):
-        print(f"[ERROR] Config file not found: {path}")
-        print(f"        Copy config.example.yml to {path} and fill in your values.")
-        sys.exit(1)
-    with open(path) as f:
-        return yaml.safe_load(f)
+CONFIG_PATH = "config.yml"
+CFG: dict = {}
 
+SITE_NAME        = "Authentik HA Cluster"
+REFRESH_INTERVAL = 30
+HTTP_TIMEOUT     = 4
+VIP              = ""
 
-CONFIG_PATH = sys.argv[1] if len(sys.argv) > 1 else "config.yml"
-CFG = load_config(CONFIG_PATH)
+AK_NODES      = []
+PATRONI_NODES = []
+ETCD_NODES    = []
+HAPROXY_NODES = []
+KA_NODES      = []
+TRACK_WEIGHT  = -20
 
-# Convenience accessors
-SITE_NAME         = CFG.get("site_name", "Authentik HA Cluster")
-REFRESH_INTERVAL  = int(CFG.get("refresh_interval", 30))
-HTTP_TIMEOUT      = int(CFG.get("http_timeout", 4))
-VIP               = CFG.get("vip", "")
+P_AUTHENTIK    = 9443
+P_PATRONI      = 8008
+P_ETCD         = 2379
+P_HAPROXY      = 9000
+P_NGINX_STATUS = 8080
+P_POSTGRES     = 5432
 
-NODES             = CFG.get("nodes", {})
-PORTS             = CFG.get("ports", {})
-CREDS             = CFG.get("credentials", {})
-KA_CFG            = CFG.get("keepalived", {})
+HAPROXY_USER        = "admin"
+HAPROXY_PASS        = ""
+AUTHENTIK_API_TOKEN = ""
+PG_USER              = "postgres"
+PG_PASS               = ""
 
-# Node lists
-AK_NODES      = NODES.get("authentik", [])
-PATRONI_NODES = NODES.get("patroni", [])
-ETCD_NODES    = NODES.get("etcd", [])
-HAPROXY_NODES = NODES.get("haproxy", [])
-KA_NODES      = KA_CFG.get("nodes", [])
-TRACK_WEIGHT  = int(KA_CFG.get("track_weight", -20))
-
-# Ports
-P_AUTHENTIK   = int(PORTS.get("authentik", 9443))
-P_PATRONI     = int(PORTS.get("patroni", 8008))
-P_ETCD        = int(PORTS.get("etcd", 2379))
-P_HAPROXY     = int(PORTS.get("haproxy_stats", 9000))
-P_NGINX_STATUS = int(PORTS.get("nginx_status", 8080))
-
-# Credentials
-HAPROXY_USER        = CREDS.get("haproxy_stats_user", "admin")
-HAPROXY_PASS        = CREDS.get("haproxy_stats_pass", "")
-AUTHENTIK_API_TOKEN = CREDS.get("authentik_api_token", "")
-PG_USER             = CREDS.get("postgres_user", "postgres")
-PG_PASS             = CREDS.get("postgres_password", "")
-
-P_POSTGRES          = int(PORTS.get("postgres", 5432))
-
-# ---------------------------------------------------------------------------
-# Scheme / TLS
-#
-# The cluster's nginx does not always speak HTTPS: a site provisioned with
-# tls.provider "none" serves plain HTTP on :80, and probing it with https://
-# marks every node UNREACHABLE — which then also shows keepalived as FAULT,
-# because nginx reachability is what this monitor infers the track script from.
-#
-# akropolis emits these keys in the generated monitor config. They are OPTIONAL:
-# when absent the defaults reproduce the previous behaviour exactly
-# (https, :443, no certificate verification), so an existing production
-# config.yml keeps working untouched.
-#
-# Authentik's own health and API endpoints are deliberately NOT covered here:
-# AUTHENTIK_LISTEN__HTTPS is set regardless of the nginx TLS provider, so
-# :9443 is always HTTPS (self-signed on a lab site) and stays as it was.
-SCHEME_CFG   = CFG.get("scheme", {}) or {}
-NGINX_SCHEME = str(SCHEME_CFG.get("nginx", "https")).lower()
-NGINX_PORT   = int(SCHEME_CFG.get("nginx_port", 443 if NGINX_SCHEME == "https" else 80))
-VERIFY_TLS   = bool(SCHEME_CFG.get("verify_tls", False))
+NGINX_SCHEME = "https"
+NGINX_PORT   = 443
+VERIFY_TLS   = False
 
 
 def nginx_url(host: str, path: str = "/monitor") -> str:
     """URL for the per-node (or VIP) nginx identity endpoint."""
     return f"{NGINX_SCHEME}://{host}:{NGINX_PORT}{path}"
-SLOT_WARN_BYTES     = 100 * 1024 * 1024   # 100 MB — yellow
-SLOT_CRIT_BYTES     = 1024 ** 3           # 1 GB  — red
+
+
+SLOT_WARN_BYTES = 100 * 1024 * 1024   # 100 MB, yellow
+SLOT_CRIT_BYTES = 1024 ** 3           # 1 GB, red
+
+
+def load_site(path: str) -> dict:
+    """Load a site config YAML file and populate every module-level global
+    above from it. Call this (directly, or via run()) before starting
+    ClusterMonitor; nothing above is valid until it has run once.
+    """
+    global CONFIG_PATH, CFG
+    global SITE_NAME, REFRESH_INTERVAL, HTTP_TIMEOUT, VIP
+    global AK_NODES, PATRONI_NODES, ETCD_NODES, HAPROXY_NODES, KA_NODES, TRACK_WEIGHT
+    global P_AUTHENTIK, P_PATRONI, P_ETCD, P_HAPROXY, P_NGINX_STATUS, P_POSTGRES
+    global HAPROXY_USER, HAPROXY_PASS, AUTHENTIK_API_TOKEN, PG_USER, PG_PASS
+    global NGINX_SCHEME, NGINX_PORT, VERIFY_TLS
+    global _UNICODE, _BULLET, OK, DOWN, WARN, GREY
+
+    if not os.path.exists(path):
+        print(f"[ERROR] Config file not found: {path}")
+        print(f"        Copy config.yml.example to {path} and fill in your values.")
+        sys.exit(1)
+    with open(path) as f:
+        CFG = yaml.safe_load(f)
+    CONFIG_PATH = path
+
+    SITE_NAME        = CFG.get("site_name", "Authentik HA Cluster")
+    REFRESH_INTERVAL = int(CFG.get("refresh_interval", 30))
+    HTTP_TIMEOUT     = int(CFG.get("http_timeout", 4))
+    VIP              = CFG.get("vip", "")
+
+    nodes  = CFG.get("nodes", {})
+    ports  = CFG.get("ports", {})
+    creds  = CFG.get("credentials", {})
+    ka_cfg = CFG.get("keepalived", {})
+
+    AK_NODES      = nodes.get("authentik", [])
+    PATRONI_NODES = nodes.get("patroni", [])
+    ETCD_NODES    = nodes.get("etcd", [])
+    HAPROXY_NODES = nodes.get("haproxy", [])
+    KA_NODES      = ka_cfg.get("nodes", [])
+    TRACK_WEIGHT  = int(ka_cfg.get("track_weight", -20))
+
+    P_AUTHENTIK    = int(ports.get("authentik", 9443))
+    P_PATRONI      = int(ports.get("patroni", 8008))
+    P_ETCD         = int(ports.get("etcd", 2379))
+    P_HAPROXY      = int(ports.get("haproxy_stats", 9000))
+    P_NGINX_STATUS = int(ports.get("nginx_status", 8080))
+    P_POSTGRES     = int(ports.get("postgres", 5432))
+
+    HAPROXY_USER        = creds.get("haproxy_stats_user", "admin")
+    HAPROXY_PASS        = creds.get("haproxy_stats_pass", "")
+    AUTHENTIK_API_TOKEN = creds.get("authentik_api_token", "")
+    PG_USER              = creds.get("postgres_user", "postgres")
+    PG_PASS               = creds.get("postgres_password", "")
+
+    # Scheme / TLS
+    #
+    # The cluster's nginx does not always speak HTTPS: a site provisioned
+    # with tls.provider "none" serves plain HTTP on :80, and probing it
+    # with https:// marks every node UNREACHABLE, which then also shows
+    # keepalived as FAULT, because nginx reachability is what this monitor
+    # infers the track script from.
+    #
+    # akropolis emits these keys in the generated monitor config. They are
+    # OPTIONAL: when absent the defaults reproduce the previous behaviour
+    # exactly (https, :443, no certificate verification), so an existing
+    # production config.yml keeps working untouched.
+    #
+    # Authentik's own health and API endpoints are deliberately NOT covered
+    # here: AUTHENTIK_LISTEN__HTTPS is set regardless of the nginx TLS
+    # provider, so :9443 is always HTTPS (self-signed on a lab site) and
+    # stays as it was.
+    scheme_cfg   = CFG.get("scheme", {}) or {}
+    NGINX_SCHEME = str(scheme_cfg.get("nginx", "https")).lower()
+    NGINX_PORT   = int(scheme_cfg.get("nginx_port", 443 if NGINX_SCHEME == "https" else 80))
+    VERIFY_TLS   = bool(scheme_cfg.get("verify_tls", False))
+
+    # unicode_bullets can only be honoured once CFG is loaded, so the dot
+    # indicators (defined further down, computed once at import time from
+    # locale alone) are recomputed here against the real config.
+    _UNICODE = _terminal_supports_unicode()
+    _BULLET  = "●" if _UNICODE else "*"
+    OK   = f"[bold green]{_BULLET}[/]"
+    DOWN = f"[bold red]{_BULLET}[/]"
+    WARN = f"[bold yellow]{_BULLET}[/]"
+    GREY = f"[dim white]{_BULLET}[/]"
+
+    return CFG
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +180,7 @@ SLOT_CRIT_BYTES     = 1024 ** 3           # 1 GB  — red
 
 def check_keepalived_node(node: dict) -> dict:
     """
-    Hit <scheme>://<node_ip>/monitor — returns JSON with node name.
+    Hit <scheme>://<node_ip>/monitor, which returns JSON with the node name.
     Also checks if this node currently holds the VIP by hitting the VIP's /monitor
     and comparing the returned node name.
     Infers nginx up/down and calculates effective priority.
@@ -152,7 +211,7 @@ def check_keepalived_node(node: dict) -> dict:
 
 def check_vip_holder() -> dict:
     """
-    Hit <scheme>://<VIP>/monitor — the node that responds is the current MASTER.
+    Hit <scheme>://<VIP>/monitor; the node that responds is the current MASTER.
     Returns the node name/ip that holds the VIP, or None if VIP is unreachable.
     """
     try:
@@ -290,7 +349,7 @@ def check_etcd_node(node: dict) -> dict:
     except Exception:
         return {"ip": ip, "name": node.get("name", ip),
                 "ok": False, "leader": False, "raft_term": "?", "db_kb": 0}
-    # etcd 3.5+ v3 API — POST /v3/maintenance/status
+    # etcd 3.5+ v3 API: POST /v3/maintenance/status
     # member_id == leader means this node is the leader
     is_leader = False
     raft_term = "?"
@@ -377,7 +436,7 @@ def check_authentik_task_queue() -> dict:
             verify=False,
         )
         if r.status_code in (401, 403):
-            return {"ok": False, "error": "unauthorized — token needs superuser permissions"}
+            return {"ok": False, "error": "unauthorized: token needs superuser permissions"}
         if r.status_code != 200:
             return {"ok": False, "error": f"HTTP {r.status_code}"}
         d = r.json()
@@ -396,11 +455,11 @@ def check_authentik_task_queue() -> dict:
 
 def check_authentik_workers() -> dict:
     """
-    /api/v3/tasks/workers/ — workers currently connected via the broker
+    /api/v3/tasks/workers/: workers currently connected via the broker
     heartbeat. Same number as the admin 'Workers' widget, and the ONLY
     reliable signal a worker is actually consuming tasks. The :9080
     /-/health/live/ probe is the Rust/axum liveness server and stays 200
-    even when the dramatiq consumer is dead — never judge worker health from it.
+    even when the dramatiq consumer is dead; never judge worker health from it.
 
     worker_id format is "<uuid>@<hostname>", so we map each connection back
     to its node and flag any node with zero connected workers.
@@ -417,7 +476,7 @@ def check_authentik_workers() -> dict:
             timeout=HTTP_TIMEOUT, verify=False,
         )
         if r.status_code in (401, 403):
-            return {"ok": False, "error": "unauthorized — token needs admin perms",
+            return {"ok": False, "error": "unauthorized: token needs admin perms",
                     "count": 0, "expected": len(expected),
                     "present": [], "missing": expected, "mismatched": []}
         if r.status_code != 200:
@@ -762,16 +821,16 @@ class WorkersPanel(Static):
         if not d:
             return "  [dim]Checking...[/]"
         if d.get("ok") is None:
-            return f"  {GREY} [dim]No API token — set credentials.authentik_api_token[/]"
+            return f"  {GREY} [dim]No API token; set credentials.authentik_api_token[/]"
         if d.get("ok") is False:
             return f"  {DOWN} [bold red]ERROR:[/] {d.get('error','unknown')}"
 
         count, expected = d["count"], d["expected"]
         missing, mism   = d["missing"], d["mismatched"]
         if missing:
-            dot, color, state = DOWN, "red", f"[bold red]{count}/{expected}[/] — missing: " + ", ".join(missing)
+            dot, color, state = DOWN, "red", f"[bold red]{count}/{expected}[/] missing: " + ", ".join(missing)
         elif mism:
-            dot, color, state = WARN, "yellow", f"[yellow]{count}/{expected}[/] — version mismatch: " + ", ".join(mism)
+            dot, color, state = WARN, "yellow", f"[yellow]{count}/{expected}[/] version mismatch: " + ", ".join(mism)
         else:
             dot, color, state = OK, "green", f"[bold green]{count}/{expected} connected[/]"
         present = "  ".join(f"[cyan]{n}[/]" for n in d["present"]) or "[dim]none[/]"
@@ -790,7 +849,7 @@ class WorkerQueuePanel(Static):
 
         ok = d.get("ok")
         if ok is None:
-            return f"  {GREY} [dim]No API token configured — set credentials.authentik_api_token in config.yml[/]"
+            return f"  {GREY} [dim]No API token configured; set credentials.authentik_api_token in config.yml[/]"
         if ok is False:
             return f"  {DOWN} [bold red]ERROR:[/] {d.get('error', 'unknown')}"
 
@@ -869,12 +928,17 @@ class NginxPanel(Static):
 
 class StatusBar(Static):
     last_refresh: reactive[str] = reactive("")
-    status_dot:   reactive[str] = reactive(GREY)
+    # Deliberately defaulted to "" rather than to GREY: a class-body default
+    # is evaluated at import time, which is before load_site() has had a
+    # chance to honour unicode_bullets, so it would freeze the pre-config
+    # bullet into the widget and render a stray "●" on a terminal that asked
+    # for "*". Resolved against the loaded config in render_content instead.
+    status_dot:   reactive[str] = reactive("")
 
     def render_content(self) -> str:
         ts = self.last_refresh or "—"
         return (
-            f"  {self.status_dot}    "
+            f"  {self.status_dot or GREY}    "
             f"[dim]Last refresh: {ts}   "
             f"Auto-refresh: {REFRESH_INTERVAL}s   "
             f"Config: {CONFIG_PATH}[/]"
@@ -933,11 +997,17 @@ Footer {
 
 class ClusterMonitor(App):
     CSS = CSS
-    TITLE = SITE_NAME
     BINDINGS = [
         ("r", "refresh_now", "Refresh"),
         ("q", "quit", "Quit"),
     ]
+
+    def __init__(self, *args, **kwargs) -> None:
+        # SITE_NAME is only known once load_site() has run, which happens
+        # after this class body executes at import time, so the terminal
+        # title is set here rather than via the App.TITLE class attribute.
+        super().__init__(*args, **kwargs)
+        self.title = SITE_NAME
 
     def compose(self) -> ComposeResult:
         yield Static(f"  {GREY}  {SITE_NAME}", id="title")
@@ -1145,5 +1215,16 @@ class ClusterMonitor(App):
         sb.last_refresh = ts
 
 
-if __name__ == "__main__":
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def run(path: str = "config.yml") -> None:
+    """Load a site config and start the dashboard. This is what
+    akropolis_monitor.cli calls for the `dashboard` subcommand."""
+    load_site(path)
     ClusterMonitor().run()
+
+
+if __name__ == "__main__":
+    run(sys.argv[1] if len(sys.argv) > 1 else "config.yml")
