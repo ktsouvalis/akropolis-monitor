@@ -1,4 +1,6 @@
-# akropolis-monitor
+<p align="center">
+<img src="./assets/akropolis-monitor-top-black.png" width="60%" />
+</p>
 
 Operational TUIs for an **Authentik HA cluster** (Authentik + Patroni/PostgreSQL
 + etcd + HAProxy + keepalived/VIP + nginx). Nothing here runs inside the
@@ -108,6 +110,10 @@ set.
 Real-time TUI, one panel per service, refreshed every `refresh_interval`
 seconds.
 
+<p align="center">
+<img src="./assets/monitor-screenshot.png" width="90%" />
+</p>
+
 | Panel | How |
 |---|---|
 | **VIP / keepalived / nginx** | `/monitor` on each node and on the VIP; infers the track script's state and effective priorities |
@@ -179,24 +185,6 @@ services:
 
 Needs SSH access to every node (`ssh.username` and `ssh.key_file` in the
 config), plus the Docker CLI and `journalctl` on the nodes that run them.
-
----
-
-## `import_users.py`
-
-A standalone script, deliberately outside the package and the CLI: it is a
-one-off bulk-import tool, not part of the monitoring surface.
-
-It imports users into Authentik from a CSV (surname, name, and an email column
-whose header merely has to contain `@`), reading the Authentik URL and API
-token from the same config file. It creates missing users, updates changed
-emails on existing ones, and can add everyone to a group.
-
-```bash
-python3 import_users.py users.csv --dry-run
-python3 import_users.py users.csv --group "Lab Members"
-python3 import_users.py users.csv --config config.site-b.yml
-```
 
 ---
 

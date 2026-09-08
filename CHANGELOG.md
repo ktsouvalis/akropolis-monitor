@@ -57,11 +57,19 @@ shipped.
   them. See CLAUDE.md for why.
 - Em dashes removed from prose, comments, and output strings throughout, with
   two deliberate exceptions: the single-character placeholder glyphs the
-  dashboard renders for "no data", and `import_users.py`.
-- `requirements.txt` now points at `pip install -e .` instead of duplicating
-  the dependency list that `pyproject.toml` owns.
+  dashboard renders for "no data".
 
 ### Removed
+
+- `import_users.py`, a one-off CSV bulk-import script that was never part of
+  the monitoring surface. Its history is in `git log`; extend from there
+  rather than rewriting it from scratch if bulk import is needed again.
+- `requirements.txt`. `pyproject.toml` owns the dependency list, and
+  `pip install -e .` is the documented way in. Note that
+  `pip install -r requirements.txt` now fails outright rather than doing the
+  right thing, so any runbook still carrying that line needs updating.
+- `authentik.url` from `config.yml.example`. `import_users.py` was its only
+  consumer. akropolis still emits the key at handoff, which is harmless.
 
 - `vrrp_interface` from `config.yml.example`. It was documented as "used for
   display only" and nothing has ever displayed it; no code in this repository

@@ -25,7 +25,6 @@ akropolis_monitor/          the package; the only importable code
   cli.py                    argparse dispatcher, lazy-imports the two below
   dashboard.py              the health TUI (was monitor.py)
   logs.py                   the log viewer TUI (was logs_viewer.py)
-import_users.py             standalone script, NOT part of the package
 tools/build_pyz.sh          builds the single-file zipapp
 .github/workflows/release.yml   tag-triggered release
 ```
@@ -39,8 +38,6 @@ akropolis-monitor dashboard                     # uses ./config.yml
 akropolis-monitor dashboard config.site-b.yml   # positional arg, NOT --config
 akropolis-monitor logs --config config.yml --last 12
 akropolis-monitor logs --save cluster_logs      # writes cluster_logs.log, no TUI
-
-python3 import_users.py users.csv --group "Lab Members" --dry-run
 ```
 
 **The config-flag asymmetry is deliberate.** `dashboard` takes a bare
@@ -61,8 +58,8 @@ exceptions, both of which will look like misses and are not:
 1. The single-character `"—"` placeholder glyphs the dashboard renders for
    "no data" (unknown Patroni timeline, unset last-refresh). Those are UI, not
    prose. Leave them.
-2. `import_users.py` in its entirety. It was a one-time script and is left
-   untouched on purpose.
+2. Anything in a file that is being deleted rather than maintained. Do not
+   spend edits tidying prose on its way out.
 
 ## Config files
 
@@ -73,8 +70,7 @@ update the example when adding a config key**, not just the working files.
 Key sections: `nodes:` (per-service IP/name lists: `authentik`, `patroni`,
 `etcd`, `haproxy`), `ports:`, `credentials:`, `keepalived:` (VIP failover
 priorities), `scheme:` (optional; nginx HTTP-vs-HTTPS), `services:` (drives the
-log viewer's node x service matrix), `authentik.url` (used by
-`import_users.py`).
+log viewer's node x service matrix).
 
 `*.yml` and `*.csv` are gitignored, with `config.yml.example` and the workflow
 under `.github/workflows/` negated back in. Check `git add -A --dry-run` after
@@ -183,12 +179,3 @@ Commits are authored as `Konstantinos Tsouvalis <kostas.tsou@gmail.com>` and
 delivered as `git format-patch` output for `git am`. Use `git commit -F <file>`
 rather than `-m "..."`: backticks in commit messages get eaten by bash command
 substitution.
-
-## import_users.py vs history
-
-`mass_import.py` (an earlier ESDA-lab-specific script with a hardcoded user
-list) was removed in favour of `import_users.py`, which is CSV-driven, reads
-its Authentik URL and token from the config file, and handles both create and
-update-existing-email flows. Extend `import_users.py` for future bulk-import
-work rather than resurrecting the hardcoded-list pattern. It stays a standalone
-script and is deliberately not a third subcommand.

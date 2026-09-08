@@ -114,9 +114,6 @@ services:
     type: systemd
     unit: "keepalived"
 
-authentik:
-  url: "https://authentik.example.com"   # Base URL of your Authentik instance (used by import_users.py)
-
 credentials:
   haproxy_stats_user: "admin"
   haproxy_stats_pass: "your_haproxy_stats_password"
