@@ -19,9 +19,6 @@ http_timeout: 5
 # VIP managed by keepalived
 vip: "<your VIP>"
 
-# Network interface keepalived runs on (used for display only)
-vrrp_interface: "ens18"
-
 nodes:
   authentik:
     - ip: "<node-1-ip>"

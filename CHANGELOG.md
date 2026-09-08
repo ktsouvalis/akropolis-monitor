@@ -61,6 +61,14 @@ shipped.
 - `requirements.txt` now points at `pip install -e .` instead of duplicating
   the dependency list that `pyproject.toml` owns.
 
+### Removed
+
+- `vrrp_interface` from `config.yml.example`. It was documented as "used for
+  display only" and nothing has ever displayed it; no code in this repository
+  reads the key. akropolis still emits it in the config it hands off, which is
+  harmless: an unread key is simply ignored.
+- An unused `textual.timer.Timer` import.
+
 ### Fixed
 
 - The dashboard's terminal title showed the default site name instead of the

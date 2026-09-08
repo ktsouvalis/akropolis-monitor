@@ -30,7 +30,6 @@ import urllib3
 from textual.app import App, ComposeResult
 from textual.widgets import Static, Footer
 from textual.reactive import reactive
-from textual.timer import Timer
 from textual import work
 from textual.containers import Horizontal
 
