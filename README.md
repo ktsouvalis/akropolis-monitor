@@ -2,9 +2,11 @@
 <img src="./assets/akropolis-monitor-top-black.png" width="60%" />
 </p>
 
-Operational TUIs for an **Authentik HA cluster** (Authentik + Patroni/PostgreSQL
-+ etcd + HAProxy + keepalived/VIP + nginx). Nothing here runs inside the
-cluster: it connects out over HTTP and SSH from an operator's workstation.
+<h1 align="center">akropolis-monitor</h1>
+
+Operational TUIs for an **Authentik HA cluster**: Authentik, Patroni/PostgreSQL,
+etcd, HAProxy, keepalived/VIP, nginx. Nothing here runs inside the cluster; it
+connects out over HTTP and SSH from an operator's workstation.
 
 ```
 akropolis-monitor dashboard      # real-time cluster health
