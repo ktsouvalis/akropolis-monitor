@@ -1,5 +1,0 @@
-# Dependencies are declared in pyproject.toml, which is the single source of
-# truth. This file exists only so that `pip install -r requirements.txt`,
-# which is in a lot of shell history and older notes, still does the right
-# thing rather than installing a list that has quietly drifted.
--e .
