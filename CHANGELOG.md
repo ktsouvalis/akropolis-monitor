@@ -10,7 +10,7 @@ That history is in `git log`; it is not reproduced here.
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-09-07
+## [1.0.0] - 2026-09-08
 
 First tagged release, and the point at which this repository stops being a
 folder of scripts and becomes an installable package with a single entry
