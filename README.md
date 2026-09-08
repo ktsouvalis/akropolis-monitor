@@ -155,6 +155,10 @@ Collects warnings and errors from every service on every node over SSH.
 Containerised services are read with `docker logs`, bare-metal ones from
 `journalctl`.
 
+<p align="center">
+<img src="./assets/logs-screenshot.png" width="90%" />
+</p>
+
 ```bash
 akropolis-monitor logs                          # TUI, last 24h, warning and above
 akropolis-monitor logs --last 6 --level error
